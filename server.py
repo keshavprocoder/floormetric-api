@@ -34,7 +34,11 @@ def init_db():
             )
         """)
 
-init_db()
+init_db():
+
+@app.get("/")
+def health_check():
+    return {"status": "online", "service": "FLOOR METRIC AI Architect API"}
 
 class WallOpeningSchema(BaseModel):
     id: str
