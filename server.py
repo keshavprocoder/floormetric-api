@@ -4,13 +4,12 @@ from datetime import datetime, timezone
 from typing import List, Literal
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from google import genai
 from google.genai import types
 
 app = FastAPI(title="FLOOR METRIC AI Architect API")
 
-# Allow requests from Chrome web preview and Android app
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,6 +19,7 @@ app.add_middleware(
 
 client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 DB_PATH = "credits.db"
+
 
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
@@ -34,11 +34,14 @@ def init_db():
             )
         """)
 
-init_db():
+
+init_db()
+
 
 @app.get("/")
 def health_check():
     return {"status": "online", "service": "FLOOR METRIC AI Architect API"}
+
 
 class WallOpeningSchema(BaseModel):
     id: str
@@ -46,6 +49,7 @@ class WallOpeningSchema(BaseModel):
     wall: Literal["north", "south", "east", "west"]
     offsetCm: float
     widthCm: float
+
 
 class CadFixtureSchema(BaseModel):
     id: str
@@ -56,6 +60,7 @@ class CadFixtureSchema(BaseModel):
     widthCm: float
     lengthCm: float
     rotationDeg: float = 0.0
+
 
 class ArchRoomSchema(BaseModel):
     id: str
@@ -69,21 +74,25 @@ class ArchRoomSchema(BaseModel):
     openings: List[WallOpeningSchema]
     fixtures: List[CadFixtureSchema]
 
+
 class HousePlanSchema(BaseModel):
     id: str
     projectName: str
     architectName: str = "FLOOR METRIC AI STUDIO"
     rooms: List[ArchRoomSchema]
 
+
 class GenerateRequest(BaseModel):
     device_id: str
     prompt: str
     floor_level: int = 0
 
+
 class VerifyPurchaseRequest(BaseModel):
     device_id: str
     product_id: str
     purchase_token: str
+
 
 def get_and_sync_wallet(conn, device_id: str) -> dict:
     now_utc = datetime.now(timezone.utc)
@@ -121,6 +130,7 @@ def get_and_sync_wallet(conn, device_id: str) -> dict:
         "lastResetUtc": last_reset.isoformat(),
     }
 
+
 @app.post("/activate-pro")
 def activate_pro(req: VerifyPurchaseRequest):
     if not req.purchase_token or len(req.purchase_token) < 10:
@@ -133,6 +143,7 @@ def activate_pro(req: VerifyPurchaseRequest):
             (now_utc, req.device_id),
         )
         return get_and_sync_wallet(conn, req.device_id)
+
 
 @app.post("/restore-credits")
 def restore_credits(req: VerifyPurchaseRequest):
@@ -147,6 +158,7 @@ def restore_credits(req: VerifyPurchaseRequest):
             (new_bonus, req.device_id),
         )
         return get_and_sync_wallet(conn, req.device_id)
+
 
 @app.post("/generate-plan")
 def generate_plan(req: GenerateRequest):
