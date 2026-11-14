@@ -20,6 +20,14 @@ app.add_middleware(
 
 DB_PATH = "credits.db"
 
+# Primary model recommended by Google AI Studio, plus automatic fallbacks
+CANDIDATE_MODELS = [
+    "gemini-3.8-flash",
+    "gemini-3.0-flash",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+]
+
 
 def get_genai_client() -> genai.Client:
     raw_key = (os.environ.get("GEMINI_API_KEY") or "").strip().strip('"').strip("'")
@@ -187,25 +195,32 @@ def generate_plan(req: GenerateRequest):
             "Ensure all fixtures fit comfortably inside room boundaries."
         )
 
-        try:
-            client = get_genai_client()
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=f"Floor Level: {req.floor_level}. Design request: {req.prompt}",
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    response_mime_type="application/json",
-                    response_schema=HousePlanSchema,
-                    temperature=0.3,
-                ),
-            )
-            plan_text = response.text
-            if not plan_text:
-                raise ValueError("Empty response from Gemini model.")
-            # Validate JSON structure before deducting credits
-            json.loads(plan_text)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Gemini error: {str(e)}")
+        client = get_genai_client()
+        plan_text = None
+        last_error = None
+
+        for model_name in CANDIDATE_MODELS:
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=f"Floor Level: {req.floor_level}. Design request: {req.prompt}",
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        response_mime_type="application/json",
+                        response_schema=HousePlanSchema,
+                        temperature=0.3,
+                    ),
+                )
+                if response.text:
+                    json.loads(response.text)
+                    plan_text = response.text
+                    break
+            except Exception as e:
+                last_error = e
+                continue
+
+        if not plan_text:
+            raise HTTPException(status_code=500, detail=f"Gemini error: {str(last_error)}")
 
         daily = wallet["dailyCredits"]
         bonus = wallet["restoredBonusCredits"]
