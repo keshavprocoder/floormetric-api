@@ -21,12 +21,6 @@ app.add_middleware(
 
 DB_PATH = "credits.db"
 
-# Updated candidate models compatible with the current Google GenAI SDK
-CANDIDATE_MODELS = [
-    "gemini-2.0-flash",
-    "gemini-1.5-flash",
-]
-
 
 def get_genai_client() -> genai.Client:
     raw_key = (os.environ.get("GEMINI_API_KEY") or "").strip().strip('"').strip("'")
@@ -36,6 +30,31 @@ def get_genai_client() -> genai.Client:
             detail="GEMINI_API_KEY is missing in Render Environment Variables.",
         )
     return genai.Client(api_key=raw_key)
+
+
+def get_working_model_list(client: genai.Client) -> List[str]:
+    """Dynamically queries Google's API for the exact models enabled on this API key."""
+    models_to_try = []
+    try:
+        for m in client.models.list():
+            name = getattr(m, "name", "") or ""
+            lower = name.lower()
+            supported = getattr(m, "supported_actions", None) or getattr(m, "supported_generation_methods", None) or []
+            if supported and "generateContent" not in supported and "generate_content" not in supported:
+                continue
+            if "gemini" in lower and ("flash" in lower or "pro" in lower):
+                if not any(bad in lower for bad in ["embedding", "vision", "imagen", "veo", "audio", "tts", "2.5-flash"]):
+                    clean_name = name.replace("models/", "")
+                    if clean_name not in models_to_try:
+                        models_to_try.append(clean_name)
+    except Exception:
+        pass
+
+    for fallback in ["gemini-3.8-flash", "gemini-3.0-flash", "gemini-2.5-pro", "gemini-2.0-flash"]:
+        if fallback not in models_to_try:
+            models_to_try.append(fallback)
+
+    return models_to_try
 
 
 def init_db():
@@ -59,8 +78,23 @@ init_db()
 def health_check():
     return {
         "status": "online",
-        "service": "FLOOR METRIC AI Architect API",
+        "version": "v3-live-auto-discovery",
         "web_app_url": "/app/",
+    }
+
+
+@app.get("/test-ai")
+def test_ai_models():
+    client = get_genai_client()
+    raw_models = []
+    try:
+        for m in client.models.list():
+            raw_models.append(getattr(m, "name", str(m)))
+    except Exception as e:
+        raw_models.append(f"Error listing models: {str(e)}")
+    return {
+        "selected_models_to_try": get_working_model_list(client),
+        "all_api_key_models": raw_models,
     }
 
 
@@ -199,9 +233,11 @@ def generate_plan(req: GenerateRequest):
 
         client = get_genai_client()
         plan_text = None
-        last_error = None
+        errors_log = []
 
-        for model_name in CANDIDATE_MODELS:
+        models_to_try = get_working_model_list(client)
+
+        for model_name in models_to_try:
             try:
                 response = client.models.generate_content(
                     model=model_name,
@@ -218,11 +254,14 @@ def generate_plan(req: GenerateRequest):
                     plan_text = response.text
                     break
             except Exception as e:
-                last_error = e
+                errors_log.append(f"[{model_name}]: {str(e)}")
                 continue
 
         if not plan_text:
-            raise HTTPException(status_code=500, detail=f"Gemini error: {str(last_error)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"v3-auto-discovery failed ({len(models_to_try)} models tried). Errors: {' | '.join(errors_log[:3])}",
+            )
 
         daily = wallet["dailyCredits"]
         bonus = wallet["restoredBonusCredits"]
