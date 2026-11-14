@@ -21,12 +21,12 @@ app.add_middleware(
 
 DB_PATH = "credits.db"
 
-# Primary model requested by Google AI Studio, plus automatic fallbacks
+# Updated candidate models compatible with the current Google GenAI SDK
 CANDIDATE_MODELS = [
-    "gemini-3.8-flash",
-    "gemini-3.0-flash",
+    "gemini-2.5-flash",
     "gemini-2.0-flash",
     "gemini-1.5-flash",
+    "gemini-flash-experimental",
 ]
 
 
@@ -66,7 +66,6 @@ def health_check():
     }
 
 
-# Gemini response_schema requires NO default values on fields
 class WallOpeningSchema(BaseModel):
     id: str
     type: Literal["doorLeft", "doorRight", "window"]
@@ -122,7 +121,6 @@ def get_and_sync_wallet(conn, device_id: str) -> dict:
     now_utc = datetime.now(timezone.utc)
     row = conn.execute("SELECT * FROM wallets WHERE device_id = ?", (device_id,)).fetchone()
     if not row:
-        # Auto-provision 100 Pro credits if Render free tier wiped credits.db on restart
         conn.execute(
             "INSERT INTO wallets VALUES (?, 1, 100, 0, 0, ?)",
             (device_id, now_utc.isoformat()),
@@ -249,6 +247,5 @@ def generate_plan(req: GenerateRequest):
         }
 
 
-# Serves the universal iPhone / Web app at https://floormetric-api.onrender.com/app/
 if os.path.isdir("web_app"):
     app.mount("/app", StaticFiles(directory="web_app", html=True), name="web_app")
