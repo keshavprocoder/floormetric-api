@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import List, Literal
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from google import genai
 from google.genai import types
@@ -20,7 +21,7 @@ app.add_middleware(
 
 DB_PATH = "credits.db"
 
-# Primary model recommended by Google AI Studio, plus automatic fallbacks
+# Primary model requested by Google AI Studio, plus automatic fallbacks
 CANDIDATE_MODELS = [
     "gemini-3.8-flash",
     "gemini-3.0-flash",
@@ -58,7 +59,11 @@ init_db()
 
 @app.get("/")
 def health_check():
-    return {"status": "online", "service": "FLOOR METRIC AI Architect API"}
+    return {
+        "status": "online",
+        "service": "FLOOR METRIC AI Architect API",
+        "web_app_url": "/app/",
+    }
 
 
 # Gemini response_schema requires NO default values on fields
@@ -190,7 +195,8 @@ def generate_plan(req: GenerateRequest):
         system_instruction = (
             "You are a senior residential architect. Convert the prompt into a realistic, "
             "non-overlapping 2D floor plan in centimeters. Stack rooms flush edge-to-edge so adjacent "
-            "rooms share walls (use wallThicknessCm=23.0, rotationDeg=0.0, architectName='FLOOR METRIC AI'). "
+            "rooms share walls (use wallThicknessCm=23.0, rotationDeg=0.0, "
+            f"floorLevel={req.floor_level}, architectName='FLOOR METRIC AI'). "
             "Place doors on connecting walls and windows on exterior walls. "
             "Ensure all fixtures fit comfortably inside room boundaries."
         )
@@ -241,3 +247,8 @@ def generate_plan(req: GenerateRequest):
             "wallet": updated_wallet,
             "plan_json": plan_text,
         }
+
+
+# Serves the universal iPhone / Web app at https://floormetric-api.onrender.com/app/
+if os.path.isdir("web_app"):
+    app.mount("/app", StaticFiles(directory="web_app", html=True), name="web_app")
