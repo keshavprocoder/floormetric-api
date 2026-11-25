@@ -549,16 +549,28 @@ def generate_plan(
             "Ensure all fixtures fit comfortably inside room boundaries."
         )
 
-        response = client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=f"Floor Level: {req.floor_level}. Design request: {req.prompt}",
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                response_mime_type="application/json",
-                response_schema=HousePlanSchema,
-                temperature=0.3,
-            ),
-        )
+        import time
+        response = None
+        for attempt in range(3):
+            try:
+                response = client.models.generate_content(
+                    model="gemini-3.8-flash",
+                    contents=f"Floor Level: {req.floor_level}. Design request: {req.prompt}",
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        response_mime_type="application/json",
+                        response_schema=HousePlanSchema,
+                        temperature=0.3,
+                    ),
+                )
+                break
+            except Exception as exc:
+                if any(k in str(exc) for k in ("503","UNAVAILABLE","429")) and attempt < 2:
+                    time.sleep(2)
+                    continue
+                raise HTTPException(status_code=400, detail=f"Gemini API error: {exc}")
+        if response is None:
+            raise HTTPException(status_code=400, detail="Gemini servers are busy. Please tap Generate again.")
 
         daily = wallet["dailyCredits"]
         bonus = wallet["restoredBonusCredits"]
