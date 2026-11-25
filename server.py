@@ -575,21 +575,32 @@ def generate_plan(
                 break
         if not plan_json_str:
             groq_key = os.environ.get("GROQ_API_KEY", "").strip()
-            if groq_key:
-                groq_sys = system_instruction + " Return ONLY a valid JSON object matching this JSON Schema: " + json.dumps(HousePlanSchema.model_json_schema()) + " Allowed opening.type: doorLeft, doorRight, window. Allowed opening.wall: north, south, east, west. Allowed fixture.symbolType: bed, sofa, kitchen, bath, desk, wardrobe."
-                g_resp = requests.post(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"},
-                    json={"model": "llama-3.3-70b-versatile", "messages": [{"role": "system", "content": groq_sys}, {"role": "user", "content": f"Floor Level: {req.floor_level}. Design request: {req.prompt}"}], "response_format": {"type": "json_object"}, "temperature": 0.3},
-                    timeout=30,
-                )
-                if g_resp.status_code >= 400:
-                    raise HTTPException(status_code=400, detail=f"Gemini busy ({gemini_err[:100]}) and Groq error ({g_resp.status_code}): {g_resp.text[:160]}")
-                raw_content = g_resp.json()["choices"][0]["message"]["content"]
-                plan_json_str = HousePlanSchema.model_validate_json(raw_content).model_dump_json()
-            else:
-                raise HTTPException(status_code=400, detail=f"Gemini busy ({gemini_err[:140]}). Add GROQ_API_KEY in Render for automatic fallback.")
-
+            if not groq_key:
+                raise HTTPException(status_code=400, detail=f"Gemini busy ({gemini_err[:140]}). Add GROQ_API_KEY in Render.")
+            m_resp = requests.get("https://api.groq.com/openai/v1/models", headers={"Authorization": f"Bearer {groq_key}"}, timeout=10)
+            avail = [m.get("id", "") for m in m_resp.json().get("data", [])] if m_resp.status_code == 200 else []
+            skip = ("whisper", "guard", "tts", "playai", "orpheus", "embed")
+            chat_models = [m for m in avail if m and not any(x in m.lower() for x in skip)]
+            prefs = ("gpt-oss-120b", "llama-4", "qwen", "kimi", "deepseek", "llama-3", "gpt-oss-20b")
+            chat_models.sort(key=lambda m: next((i for i, k in enumerate(prefs) if k in m.lower()), 99))
+            if not chat_models:
+                chat_models = ["openai/gpt-oss-120b", "meta-llama/llama-4-scout-17b-16e-instruct", "qwen/qwen3-32b"]
+            groq_sys = system_instruction + " Output ONLY valid JSON matching this exact structure (allowed opening.type: doorLeft, doorRight, window; opening.wall: north, south, east, west; fixture.symbolType: bed, sofa, kitchen, bath, desk, wardrobe): " + '{"id": "plan_1", "projectName": "Modern Home", "architectName": "FLOOR METRIC AI STUDIO", "rooms": [{"id": "r1", "name": "Living Room", "offsetXCm": 0, "offsetYCm": 0, "widthCm": 420, "lengthCm": 360, "wallThicknessCm": 23, "floorLevel": 0, "openings": [{"id": "o1", "type": "doorLeft", "wall": "south", "offsetCm": 120, "widthCm": 90}, {"id": "o2", "type": "window", "wall": "north", "offsetCm": 150, "widthCm": 120}], "fixtures": [{"id": "f1", "label": "3-Seat Sofa", "symbolType": "sofa", "xCm": 100, "yCm": 60, "widthCm": 210, "lengthCm": 85, "rotationDeg": 0}]}]}'
+            last_g_err = ""
+            for g_model in chat_models[:5]:
+                try:
+                    g_resp = requests.post("https://api.groq.com/openai/v1/chat/completions", headers={"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"}, json={"model": g_model, "messages": [{"role": "system", "content": groq_sys}, {"role": "user", "content": f"Floor Level: {req.floor_level}. Design request: {req.prompt}"}], "response_format": {"type": "json_object"}, "temperature": 0.3}, timeout=30)
+                    if g_resp.status_code >= 400:
+                        last_g_err = f"{g_model} ({g_resp.status_code}): {g_resp.text[:120]}"
+                        continue
+                    raw_content = g_resp.json()["choices"][0]["message"]["content"]
+                    plan_json_str = HousePlanSchema.model_validate_json(raw_content).model_dump_json()
+                    break
+                except Exception as g_exc:
+                    last_g_err = f"{g_model}: {str(g_exc)[:120]}"
+                    continue
+            if not plan_json_str:
+                raise HTTPException(status_code=400, detail=f"Gemini busy and Groq failed: {last_g_err}")
         daily = wallet["dailyCredits"]
         bonus = wallet["restoredBonusCredits"]
         if daily >= 10:
