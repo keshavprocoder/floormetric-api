@@ -550,11 +550,13 @@ def generate_plan(
         )
 
         import time
+        models_to_try = ["gemini-3.8-flash", "gemini-3.8-flash", "gemini-3.8-flash-lite", "gemini-flash-latest", "gemini-2.5-pro"]
         response = None
-        for attempt in range(3):
+        last_err = ""
+        for idx, model_name in enumerate(models_to_try):
             try:
                 response = client.models.generate_content(
-                    model="gemini-3.8-flash",
+                    model=model_name,
                     contents=f"Floor Level: {req.floor_level}. Design request: {req.prompt}",
                     config=types.GenerateContentConfig(
                         system_instruction=system_instruction,
@@ -563,14 +565,17 @@ def generate_plan(
                         temperature=0.3,
                     ),
                 )
-                break
+                if response and response.text:
+                    break
             except Exception as exc:
-                if any(k in str(exc) for k in ("503","UNAVAILABLE","429")) and attempt < 2:
-                    time.sleep(2)
+                last_err = str(exc)
+                if any(k in last_err for k in ("503","UNAVAILABLE","429","RESOURCE_EXHAUSTED","404","NOT_FOUND")):
+                    if idx == 0:
+                        time.sleep(1.5)
                     continue
-                raise HTTPException(status_code=400, detail=f"Gemini API error: {exc}")
-        if response is None:
-            raise HTTPException(status_code=400, detail="Gemini servers are busy. Please tap Generate again.")
+                raise HTTPException(status_code=400, detail=f"Gemini API error: {last_err}")
+        if response is None or not response.text:
+            raise HTTPException(status_code=400, detail="All Gemini models are temporarily busy. Please tap Generate again.")
 
         daily = wallet["dailyCredits"]
         bonus = wallet["restoredBonusCredits"]
