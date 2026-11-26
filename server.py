@@ -193,61 +193,23 @@ def get_current_email(authorization: Optional[str] = Header(default=None)) -> st
 
 
 def _send_otp_email(to_email: str, otp: str):
-    subject = f"{otp} is your Floor Metric verification code"
-    html_body = f"""
-    <div style="font-family:Arial,sans-serif;max-width:460px;margin:auto;padding:24px;border:1px solid #e2e8f0;border-radius:12px;">
-      <h2 style="margin:0 0 12px;color:#0f172a;">Floor Metric Verification</h2>
-      <p style="color:#334155;font-size:14px;">Use the 6-digit code below to sign in to Floor Metric. This code expires in {OTP_EXPIRY_MINUTES} minutes.</p>
-      <div style="font-size:32px;font-weight:bold;letter-spacing:8px;color:#0284c7;background:#f0f9ff;padding:16px;text-align:center;border-radius:8px;margin:20px 0;">
-        {otp}
-      </div>
-      <p style="color:#64748b;font-size:12px;">If you did not request this code, you can safely ignore this email.</p>
-    </div>
-    """
-
+    subject = "Floor Metric - Sign-In Verification Code"
+    text_body = f"Your Floor Metric verification code is: {otp}\n\nThis code expires in {OTP_EXPIRY_MINUTES} minutes. If you did not request this code, please ignore this message."
+    html_body = f"""<!DOCTYPE html><html><body style="margin:0;padding:20px;background:#f8fafc;font-family:Arial,Helvetica,sans-serif;"><div style="max-width:460px;margin:auto;background:#ffffff;padding:24px;border:1px solid #e2e8f0;border-radius:12px;"><h2 style="margin:0 0 12px;color:#0f172a;font-size:20px;">Floor Metric Verification</h2><p style="color:#334155;font-size:14px;line-height:1.5;">Use the 6-digit verification code below to sign in to your Floor Metric account. This code expires in {OTP_EXPIRY_MINUTES} minutes.</p><div style="font-size:30px;font-weight:bold;letter-spacing:8px;color:#0284c7;background:#f0f9ff;padding:16px;text-align:center;border-radius:8px;margin:20px 0;">{otp}</div><p style="color:#64748b;font-size:12px;line-height:1.4;">If you did not request this code, you can safely ignore this email.</p></div></body></html>"""
     gas_url = os.environ.get("GAS_EMAIL_URL", "").strip()
     if gas_url:
-        resp = requests.post(
-            gas_url,
-            json={
-                "secret": os.environ.get("GAS_EMAIL_SECRET", "").strip(),
-                "to": to_email,
-                "subject": subject,
-                "html": html_body,
-            },
-            timeout=15,
-        )
+        resp = requests.post(gas_url, json={"secret": os.environ.get("GAS_EMAIL_SECRET", "").strip(), "to": to_email, "subject": subject, "text": text_body, "html": html_body}, timeout=15)
         if resp.status_code >= 400:
             raise HTTPException(status_code=400, detail="Failed to send verification email.")
         return
-
     brevo_key = os.environ.get("BREVO_API_KEY", "").strip()
     sender_email = os.environ.get("SENDER_EMAIL", "").strip()
     if brevo_key and sender_email:
-        resp = requests.post(
-            "https://api.brevo.com/v3/smtp/email",
-            headers={
-                "api-key": brevo_key,
-                "Content-Type": "application/json",
-                "accept": "application/json",
-            },
-            json={
-                "sender": {"name": "Floor Metric", "email": sender_email},
-                "to": [{"email": to_email}],
-                "subject": subject,
-                "htmlContent": html_body,
-            },
-            timeout=15,
-        )
+        resp = requests.post("https://api.brevo.com/v3/smtp/email", headers={"api-key": brevo_key, "Content-Type": "application/json", "accept": "application/json"}, json={"sender": {"name": "Floor Metric", "email": sender_email}, "replyTo": {"name": "Floor Metric Support", "email": sender_email}, "to": [{"email": to_email}], "subject": subject, "textContent": text_body, "htmlContent": html_body}, timeout=15)
         if resp.status_code >= 400:
             raise HTTPException(status_code=400, detail="Failed to send verification email via Brevo.")
         return
-
-    raise HTTPException(
-        status_code=500,
-        detail="Email service not configured. Add GAS_EMAIL_URL or BREVO_API_KEY in Render.",
-    )
-
+    raise HTTPException(status_code=500, detail="Email service not configured. Add GAS_EMAIL_URL or BREVO_API_KEY in Render.")
 
 # ── Wallet Helpers (Supabase PostgreSQL) ─────────────────────────
 def get_and_sync_wallet(conn, email: str) -> dict:
