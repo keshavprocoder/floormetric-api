@@ -282,6 +282,9 @@ def get_and_sync_wallet(conn, email: str) -> dict:
             }
 
         has_pro, daily, yest, bonus, last_reset, last_restore = row
+        if bonus > 100:
+            bonus = 100
+            cur.execute("UPDATE users SET restored_bonus_credits = 100 WHERE email = %s", (email,))
         if last_restore and last_restore.tzinfo is None:
             last_restore = last_restore.replace(tzinfo=timezone.utc)
         if last_reset.tzinfo is None:
@@ -519,8 +522,8 @@ def restore_credits(
         wallet = get_and_sync_wallet(conn, email)
         if not wallet["hasLifetimePass"]:
             raise HTTPException(status_code=403, detail="Lifetime Pro Pass required.")
-        if wallet["dailyCredits"] >= 10:
-            raise HTTPException(status_code=400, detail="Finish your daily credits before restoring.")
+        if (wallet["dailyCredits"] + wallet["restoredBonusCredits"]) >= 10:
+            raise HTTPException(status_code=400, detail="Finish your available credits before restoring.")
         if wallet.get("lastRestoreUtc"):
             last_rest = datetime.fromisoformat(wallet["lastRestoreUtc"])
             if last_rest.tzinfo is None:
@@ -530,7 +533,7 @@ def restore_credits(
                 rem = int(86400 - elapsed)
                 raise HTTPException(status_code=400, detail=f"Restore available in {rem // 3600:02d}:{(rem % 3600) // 60:02d}:{rem % 60:02d}.")
         restore_amt = wallet["yesterdayUnused"] if wallet["yesterdayUnused"] > 0 else 100
-        new_bonus = wallet["restoredBonusCredits"] + restore_amt
+        new_bonus = min(100, wallet["restoredBonusCredits"] + min(100, restore_amt))
         with conn.cursor() as cur:
             cur.execute(
                 """
