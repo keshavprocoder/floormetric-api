@@ -287,6 +287,9 @@ def get_and_sync_wallet(conn, email: str) -> dict:
             cur.execute("UPDATE users SET restored_bonus_credits = 100 WHERE email = %s", (email,))
         if last_restore and last_restore.tzinfo is None:
             last_restore = last_restore.replace(tzinfo=timezone.utc)
+        if has_pro and last_restore is None:
+            last_restore = now_utc
+            cur.execute("UPDATE users SET last_restore_utc = %s WHERE email = %s", (last_restore, email))
         if last_reset.tzinfo is None:
             last_reset = last_reset.replace(tzinfo=timezone.utc)
 
@@ -502,10 +505,10 @@ def activate_pro(
             cur.execute(
                 """
                 UPDATE users
-                SET has_lifetime_pass = TRUE, daily_credits = 100, last_reset_utc = %s
+                SET has_lifetime_pass = TRUE, daily_credits = 100, last_reset_utc = %s, last_restore_utc = %s
                 WHERE email = %s
                 """,
-                (now_utc, email),
+                (now_utc, now_utc, email),
             )
         return get_and_sync_wallet(conn, email)
 
@@ -522,8 +525,6 @@ def restore_credits(
         wallet = get_and_sync_wallet(conn, email)
         if not wallet["hasLifetimePass"]:
             raise HTTPException(status_code=403, detail="Lifetime Pro Pass required.")
-        if (wallet["dailyCredits"] + wallet["restoredBonusCredits"]) >= 10:
-            raise HTTPException(status_code=400, detail="Finish your available credits before restoring.")
         if wallet.get("lastRestoreUtc"):
             last_rest = datetime.fromisoformat(wallet["lastRestoreUtc"])
             if last_rest.tzinfo is None:
