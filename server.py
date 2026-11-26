@@ -543,114 +543,108 @@ def generate_plan(
             )
 
         system_instruction = (
-            "You are a senior residential architect. Convert the prompt into a realistic, "
-            "non-overlapping 2D floor plan in centimeters. Stack rooms flush edge-to-edge so adjacent "
-            "rooms share walls. Place doors on connecting walls and windows on exterior walls. "
-            "Ensure all fixtures fit comfortably inside room boundaries."
+            "You are a senior residential architect. Output ONLY valid JSON for a non-overlapping 2D floor plan in cm. "
+            "Stack rooms flush edge-to-edge sharing walls. Doors on connecting walls, windows on exterior walls. "
+            "Keep all fixtures strictly inside room widthCm and lengthCm."
         )
         import json
-        gc = genai.Client(api_key=os.environ.get("GEMINI_API_KEY", "").strip())
         plan_json_str = None
-        ge = ""
-        try:
-            resp = gc.models.generate_content(model="gemini-3.8-flash", contents=f"Floor Level: {req.floor_level}. Design request: {req.prompt}", config=types.GenerateContentConfig(system_instruction=system_instruction, response_mime_type="application/json", response_schema=HousePlanSchema, temperature=0.3))
-            if resp and resp.text:
-                plan_json_str = HousePlanSchema.model_validate_json(resp.text).model_dump_json()
-        except Exception as exc:
-            ge = str(exc)
-        def _clean_plan(raw_txt: str) -> str:
-            obj = json.loads(raw_txt)
-            if isinstance(obj, dict) and "rooms" not in obj:
-                for v in obj.values():
+        g_key = os.environ.get("GEMINI_API_KEY", "").strip()
+        if g_key:
+            try:
+                gc = genai.Client(api_key=g_key)
+                resp = gc.models.generate_content(model="gemini-3.8-flash", contents=f"Floor Level: {req.floor_level}. Design request: {req.prompt}", config=types.GenerateContentConfig(system_instruction=system_instruction, response_mime_type="application/json", response_schema=HousePlanSchema, temperature=0.3))
+                if resp and resp.text:
+                    plan_json_str = HousePlanSchema.model_validate_json(resp.text).model_dump_json()
+            except Exception as e:
+                print(f"[AI_FALLBACK] Gemini failed: {e}", flush=True)
+        def clean_plan(raw):
+            o = json.loads(raw)
+            if isinstance(o, dict) and "rooms" not in o:
+                for v in o.values():
                     if isinstance(v, dict) and "rooms" in v:
-                        obj = v
-                        break
-            obj.setdefault("id", "plan_1")
-            obj.setdefault("projectName", "AI Floor Plan")
-            obj.setdefault("architectName", "FLOOR METRIC AI STUDIO")
-            rooms = obj.get("rooms") or []
-            if not isinstance(rooms, list) or not rooms:
+                        o = v; break
+            o.setdefault("id", "p1")
+            o.setdefault("projectName", "AI Floor Plan")
+            o.setdefault("architectName", "FLOOR METRIC AI STUDIO")
+            rms = o.get("rooms") or []
+            if not isinstance(rms, list) or not rms:
                 raise ValueError("No rooms generated")
-            for ri, r in enumerate(rooms):
-                if not isinstance(r, dict):
-                    continue
+            for ri, r in enumerate(rms):
+                if not isinstance(r, dict): continue
                 r.setdefault("id", f"room_{ri+1}")
                 r.setdefault("name", f"Room {ri+1}")
                 r.setdefault("offsetXCm", 0.0)
                 r.setdefault("offsetYCm", 0.0)
-                r.setdefault("widthCm", 360.0)
-                r.setdefault("lengthCm", 360.0)
+                rw = max(120.0, float(r.get("widthCm", 360.0)))
+                rl = max(120.0, float(r.get("lengthCm", 360.0)))
+                r["widthCm"] = rw
+                r["lengthCm"] = rl
                 r.setdefault("wallThicknessCm", 23.0)
                 r["floorLevel"] = int(r.get("floorLevel", req.floor_level))
                 ops = []
                 for oi, op in enumerate(r.get("openings") or []):
-                    if not isinstance(op, dict):
-                        continue
+                    if not isinstance(op, dict): continue
                     op.setdefault("id", f"op_{ri+1}_{oi+1}")
                     ot = str(op.get("type", "doorLeft")).lower()
                     op["type"] = "window" if "win" in ot else ("doorRight" if "right" in ot else "doorLeft")
                     wl = str(op.get("wall", "south")).lower()
                     op["wall"] = "north" if wl.startswith(("n", "top", "up")) else ("east" if wl.startswith(("e", "right")) else ("west" if wl.startswith(("w", "left")) else "south"))
-                    op.setdefault("offsetCm", 90.0)
+                    op.setdefault("offsetCm", 60.0)
                     op.setdefault("widthCm", 90.0)
                     ops.append(op)
                 r["openings"] = ops
                 fxs = []
                 for fi, fx in enumerate(r.get("fixtures") or []):
-                    if not isinstance(fx, dict):
-                        continue
+                    if not isinstance(fx, dict): continue
                     fx.setdefault("id", f"fix_{ri+1}_{fi+1}")
-                    lbl = str(fx.get("label", "Fixture"))
-                    fx["label"] = lbl
-                    st = (str(fx.get("symbolType", "")) + " " + lbl).lower()
-                    if any(k in st for k in ("bed", "cot", "mattress")):
-                        fx["symbolType"] = "bed"
-                    elif any(k in st for k in ("sofa", "couch", "tv", "lounge", "chair")):
-                        fx["symbolType"] = "sofa"
-                    elif any(k in st for k in ("kitchen", "stove", "fridge", "cook", "pantry")):
-                        fx["symbolType"] = "kitchen"
-                    elif any(k in st for k in ("bath", "toilet", "wc", "shower", "sink", "basin", "wash")):
-                        fx["symbolType"] = "bath"
-                    elif any(k in st for k in ("wardrobe", "closet", "cupboard", "almirah", "cabinet")):
-                        fx["symbolType"] = "wardrobe"
-                    else:
-                        fx["symbolType"] = "desk"
-                    fx.setdefault("xCm", 40.0)
-                    fx.setdefault("yCm", 40.0)
-                    fx.setdefault("widthCm", 100.0)
-                    fx.setdefault("lengthCm", 80.0)
+                    lb = str(fx.get("label", "Fixture"))
+                    fx["label"] = lb
+                    st = (str(fx.get("symbolType", "")) + " " + lb).lower()
+                    if any(k in st for k in ("bed", "cot", "mattress")): fx["symbolType"] = "bed"
+                    elif any(k in st for k in ("sofa", "couch", "tv", "lounge", "chair")): fx["symbolType"] = "sofa"
+                    elif any(k in st for k in ("kitchen", "stove", "fridge", "cook", "pantry")): fx["symbolType"] = "kitchen"
+                    elif any(k in st for k in ("bath", "toilet", "wc", "shower", "sink", "basin", "wash")): fx["symbolType"] = "bath"
+                    elif any(k in st for k in ("wardrobe", "closet", "cupboard", "almirah", "cabinet")): fx["symbolType"] = "wardrobe"
+                    else: fx["symbolType"] = "desk"
+                    fw = min(float(fx.get("widthCm", 100.0)), max(50.0, rw - 40.0))
+                    fl = min(float(fx.get("lengthCm", 80.0)), max(50.0, rl - 40.0))
+                    fx["widthCm"] = fw
+                    fx["lengthCm"] = fl
+                    fx["xCm"] = max(20.0, min(float(fx.get("xCm", 30.0)), rw - fw - 20.0))
+                    fx["yCm"] = max(20.0, min(float(fx.get("yCm", 30.0)), rl - fl - 20.0))
                     fx.setdefault("rotationDeg", 0.0)
                     fxs.append(fx)
                 r["fixtures"] = fxs
-            return HousePlanSchema.model_validate(obj).model_dump_json()
-        if not plan_json_str:
-            gk = os.environ.get("GROQ_API_KEY", "").strip()
-            if not gk:
-                raise HTTPException(status_code=400, detail=f"Gemini busy: {ge[:140]}")
-            mr = requests.get("https://api.groq.com/openai/v1/models", headers={"Authorization": f"Bearer {gk}"}, timeout=5)
-            av = [m.get("id", "") for m in mr.json().get("data", [])] if mr.status_code == 200 else []
-            skip = ("whisper", "guard", "tts", "playai", "orpheus", "embed", "allam")
-            cm = [m for m in av if m and not any(x in m.lower() for x in skip)]
-            prefs = ("llama-4", "llama-3.1-8b", "gpt-oss-20b", "qwen", "llama-3", "gpt-oss-120b")
-            cm.sort(key=lambda m: next((i for i, k in enumerate(prefs) if k in m.lower()), 99))
-            if not cm:
-                cm = ["meta-llama/llama-4-scout-17b-16e-instruct", "llama-3.1-8b-instant", "openai/gpt-oss-20b"]
-            smp = json.dumps({"id":"p1","projectName":"Home","architectName":"FLOOR METRIC AI STUDIO","rooms":[{"id":"r1","name":"Living Room","offsetXCm":0,"offsetYCm":0,"widthCm":420,"lengthCm":360,"wallThicknessCm":23,"floorLevel":0,"openings":[{"id":"o1","type":"doorLeft","wall":"south","offsetCm":120,"widthCm":90},{"id":"o2","type":"window","wall":"north","offsetCm":150,"widthCm":120}],"fixtures":[{"id":"f1","label":"Sofa","symbolType":"sofa","xCm":100,"yCm":60,"widthCm":210,"lengthCm":85,"rotationDeg":0}]}]})
-            gs = system_instruction + " Output ONLY valid JSON matching this structure (opening.type: doorLeft/doorRight/window; opening.wall: north/south/east/west; fixture.symbolType: bed/sofa/kitchen/bath/desk/wardrobe): " + smp
-            lge = ""
-            for gm in cm[:2]:
-                try:
-                    gr = requests.post("https://api.groq.com/openai/v1/chat/completions", headers={"Authorization": f"Bearer {gk}", "Content-Type": "application/json"}, json={"model": gm, "messages": [{"role": "system", "content": gs}, {"role": "user", "content": f"Floor Level: {req.floor_level}. Design request: {req.prompt}"}], "response_format": {"type": "json_object"}, "temperature": 0.3}, timeout=12)
-                    if gr.status_code >= 400:
-                        lge = f"{gm} ({gr.status_code}): {gr.text[:120]}"
-                        continue
-                    plan_json_str = _clean_plan(gr.json()["choices"][0]["message"]["content"])
-                    break
-                except Exception as ex:
-                    lge = f"{gm}: {str(ex)[:120]}"
+            return HousePlanSchema.model_validate(o).model_dump_json()
+        hint = " JSON keys: {id,projectName,architectName,rooms:[{id,name,offsetXCm,offsetYCm,widthCm,lengthCm,wallThicknessCm,floorLevel,openings:[{id,type(doorLeft/doorRight/window),wall(north/south/east/west),offsetCm,widthCm}],fixtures:[{id,label,symbolType(bed/sofa/kitchen/bath/desk/wardrobe),xCm,yCm,widthCm,lengthCm,rotationDeg}]}]}"
+        providers = []
+        gk = os.environ.get("GROQ_API_KEY", "").strip()
+        if gk:
+            for gm in ("llama-3.1-8b-instant", "meta-llama/llama-4-scout-17b-16e-instruct", "openai/gpt-oss-20b"):
+                providers.append(("Groq:" + gm, "https://api.groq.com/openai/v1/chat/completions", gk, gm))
+        ork = os.environ.get("OPENROUTER_API_KEY", "").strip()
+        if ork:
+            for om in ("openrouter/free", "google/gemini-2.0-flash-exp:free", "meta-llama/llama-3.3-70b-instruct:free"):
+                providers.append(("OpenRouter:" + om, "https://openrouter.ai/api/v1/chat/completions", ork, om))
+        mk = os.environ.get("MISTRAL_API_KEY", "").strip()
+        if mk:
+            providers.append(("Mistral:mistral-small-latest", "https://api.mistral.ai/v1/chat/completions", mk, "mistral-small-latest"))
+        for pname, purl, pkey, pmodel in providers:
+            if plan_json_str: break
+            try:
+                pr_resp = requests.post(purl, headers={"Authorization": f"Bearer {pkey}", "Content-Type": "application/json"}, json={"model": pmodel, "messages": [{"role": "system", "content": system_instruction + hint}, {"role": "user", "content": f"Floor Level: {req.floor_level}. Design request: {req.prompt}"}], "response_format": {"type": "json_object"}, "temperature": 0.3}, timeout=10)
+                if pr_resp.status_code >= 400:
+                    print(f"[AI_FALLBACK] {pname} HTTP {pr_resp.status_code}: {pr_resp.text[:160]}", flush=True)
                     continue
-            if not plan_json_str:
-                raise HTTPException(status_code=400, detail=f"AI error: {lge}")
+                plan_json_str = clean_plan(pr_resp.json()["choices"][0]["message"]["content"])
+                print(f"[AI_SUCCESS] {pname}", flush=True)
+                break
+            except Exception as ex:
+                print(f"[AI_FALLBACK] {pname} error: {ex}", flush=True)
+                continue
+        if not plan_json_str:
+            raise HTTPException(status_code=400, detail="AI generation failed. Please try again.")
 
         daily = wallet["dailyCredits"]
         bonus = wallet["restoredBonusCredits"]
