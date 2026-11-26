@@ -65,6 +65,7 @@ def init_db():
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
             """)
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_restore_utc TIMESTAMPTZ;")
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS email_otps (
                     email TEXT PRIMARY KEY,
@@ -255,7 +256,7 @@ def get_and_sync_wallet(conn, email: str) -> dict:
         cur.execute(
             """
             SELECT has_lifetime_pass, daily_credits, yesterday_unused,
-                   restored_bonus_credits, last_reset_utc
+                   restored_bonus_credits, last_reset_utc, last_restore_utc
             FROM users
             WHERE email = %s
             """,
@@ -277,9 +278,12 @@ def get_and_sync_wallet(conn, email: str) -> dict:
                 "yesterdayUnused": 0,
                 "restoredBonusCredits": 0,
                 "lastResetUtc": now_utc.isoformat(),
+                "lastRestoreUtc": None,
             }
 
-        has_pro, daily, yest, bonus, last_reset = row
+        has_pro, daily, yest, bonus, last_reset, last_restore = row
+        if last_restore and last_restore.tzinfo is None:
+            last_restore = last_restore.replace(tzinfo=timezone.utc)
         if last_reset.tzinfo is None:
             last_reset = last_reset.replace(tzinfo=timezone.utc)
 
@@ -302,6 +306,7 @@ def get_and_sync_wallet(conn, email: str) -> dict:
             "yesterdayUnused": yest,
             "restoredBonusCredits": bonus,
             "lastResetUtc": last_reset.isoformat(),
+            "lastRestoreUtc": last_restore.isoformat() if last_restore else None,
         }
 
 
@@ -509,18 +514,31 @@ def restore_credits(
 ):
     if not req.purchase_token or len(req.purchase_token) < 10:
         raise HTTPException(status_code=400, detail="Invalid Google Play purchase token")
+    now_utc = datetime.now(timezone.utc)
     with get_db() as conn:
         wallet = get_and_sync_wallet(conn, email)
+        if not wallet["hasLifetimePass"]:
+            raise HTTPException(status_code=403, detail="Lifetime Pro Pass required.")
+        if wallet["dailyCredits"] >= 10:
+            raise HTTPException(status_code=400, detail="Finish your daily credits before restoring.")
+        if wallet.get("lastRestoreUtc"):
+            last_rest = datetime.fromisoformat(wallet["lastRestoreUtc"])
+            if last_rest.tzinfo is None:
+                last_rest = last_rest.replace(tzinfo=timezone.utc)
+            elapsed = (now_utc - last_rest).total_seconds()
+            if elapsed < 86400:
+                rem = int(86400 - elapsed)
+                raise HTTPException(status_code=400, detail=f"Restore available in {rem // 3600:02d}:{(rem % 3600) // 60:02d}:{rem % 60:02d}.")
         restore_amt = wallet["yesterdayUnused"] if wallet["yesterdayUnused"] > 0 else 100
         new_bonus = wallet["restoredBonusCredits"] + restore_amt
         with conn.cursor() as cur:
             cur.execute(
                 """
                 UPDATE users
-                SET yesterday_unused = 0, restored_bonus_credits = %s
+                SET yesterday_unused = 0, restored_bonus_credits = %s, last_restore_utc = %s
                 WHERE email = %s
                 """,
-                (new_bonus, email),
+                (new_bonus, now_utc, email),
             )
         return get_and_sync_wallet(conn, email)
 
