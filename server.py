@@ -637,40 +637,38 @@ def generate_plan(
         user_prompt = f"Target Floor Level: {req.floor_level}.\nUser Request: {req.prompt}\nDesign EVERY requested room with accurate dimensions, flush shared walls, doors, windows, and furniture."
         g_key = os.environ.get("GEMINI_API_KEY", "").strip()
         if g_key:
-            gc = genai.Client(api_key=g_key)
-            for gm in ("gemini-3.8-flash", "gemini-3.5-flash-lite"):
+            for gm, tl, tm in (("gemini-3.8-flash", "low", 22), ("gemini-3.5-flash-lite", "minimal", 18)):
                 if plan_json_str: break
                 try:
-                    cfg = types.GenerateContentConfig(system_instruction=system_instruction, response_mime_type="application/json", response_schema=HousePlanSchema, temperature=0.35, max_output_tokens=8192)
-                    resp = gc.models.generate_content(model=gm, contents=user_prompt, config=cfg)
-                    if resp and resp.text:
-                        plan_json_str = clean_plan(resp.text); print(f"[AI_SUCCESS] Gemini:{gm}", flush=True); break
+                    gurl = f"https://generativelanguage.googleapis.com/v1beta/models/{gm}:generateContent"
+                    gpayload = {"systemInstruction": {"parts": [{"text": system_instruction + hint}]}, "contents": [{"role": "user", "parts": [{"text": user_prompt}]}], "generationConfig": {"responseMimeType": "application/json", "maxOutputTokens": 8192, "thinkingConfig": {"thinkingLevel": tl}}}
+                    gr = requests.post(gurl, headers={"x-goog-api-key": g_key, "Content-Type": "application/json"}, json=gpayload, timeout=tm)
+                    if gr.status_code >= 400:
+                        print(f"[AI_FALLBACK] Gemini:{gm} HTTP {gr.status_code}: {gr.text[:160]}", flush=True); continue
+                    parts = gr.json()["candidates"][0]["content"]["parts"]
+                    raw_g = "".join(pt.get("text", "") for pt in parts if not pt.get("thought"))
+                    plan_json_str = clean_plan(raw_g)
+                    print(f"[AI_SUCCESS] Gemini:{gm} ({tl})", flush=True); break
                 except Exception as e:
-                    print(f"[AI_FALLBACK] Gemini:{gm} schema err: {e}", flush=True)
-                    try:
-                        cfg2 = types.GenerateContentConfig(system_instruction=system_instruction + hint, response_mime_type="application/json", temperature=0.35, max_output_tokens=8192)
-                        resp2 = gc.models.generate_content(model=gm, contents=user_prompt, config=cfg2)
-                        if resp2 and resp2.text:
-                            plan_json_str = clean_plan(resp2.text); print(f"[AI_SUCCESS] Gemini:{gm}:json", flush=True); break
-                    except Exception as e2:
-                        print(f"[AI_FALLBACK] Gemini:{gm} failed: {e2}", flush=True)
+                    print(f"[AI_FALLBACK] Gemini:{gm} failed: {e}", flush=True)
         providers = []
         gk = os.environ.get("GROQ_API_KEY", "").strip()
         if gk:
-            for gm in ("openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"):
-                providers.append(("Groq:" + gm, "https" + "://" + "api." + "groq." + "com/openai/v1/chat/completions", gk, gm, False))
+            for gm in ("openai/gpt-oss-120b", "openai/gpt-oss-20b"):
+                providers.append(("Groq:" + gm, "https://api.groq.com/openai/v1/chat/completions", gk, gm, False, "low", 20))
         ork = os.environ.get("OPENROUTER_API_KEY", "").strip()
         if ork:
-            providers.append(("OpenRouter:openrouter/free", "https" + "://" + "openrouter." + "ai/api/v1/chat/completions", ork, "openrouter/free", False))
+            providers.append(("OpenRouter:openrouter/free", "https://openrouter.ai/api/v1/chat/completions", ork, "openrouter/free", False, None, 20))
         mk = os.environ.get("MISTRAL_API_KEY", "").strip()
         if mk:
-            providers.append(("Mistral:mistral-small-latest", "https" + "://" + "api." + "mistral." + "ai/api/v1/chat/completions", mk, "mistral-small-latest", True))
-        for pname, purl, pkey, pmodel, use_rf in providers:
+            providers.append(("Mistral:mistral-small-latest", "https://api.mistral.ai/v1/chat/completions", mk, "mistral-small-latest", True, None, 15))
+        for pname, purl, pkey, pmodel, use_rf, reff, pto in providers:
             if plan_json_str: break
             try:
-                payload = {"model": pmodel, "messages": [{"role": "system", "content": system_instruction + hint}, {"role": "user", "content": user_prompt}], "temperature": 0.35, "max_tokens": 8192}
+                payload = {"model": pmodel, "messages": [{"role": "system", "content": system_instruction + hint}, {"role": "user", "content": user_prompt}], "max_tokens": 8192}
                 if use_rf: payload["response_format"] = {"type": "json_object"}
-                pr_resp = requests.post(purl, headers={"Authorization": f"Bearer {pkey}", "Content-Type": "application/json"}, json=payload, timeout=35)
+                if reff: payload["reasoning_effort"] = reff
+                pr_resp = requests.post(purl, headers={"Authorization": f"Bearer {pkey}", "Content-Type": "application/json"}, json=payload, timeout=pto)
                 if pr_resp.status_code >= 400:
                     print(f"[AI_FALLBACK] {pname} HTTP {pr_resp.status_code}: {pr_resp.text[:160]}", flush=True); continue
                 msg = pr_resp.json()["choices"][0]["message"]
