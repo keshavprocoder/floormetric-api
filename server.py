@@ -348,6 +348,11 @@ def delete_account_page():
 
 
 # ── Email OTP Authentication Endpoints ───────────────────────────
+@app.api_route("/ping", methods=["GET", "HEAD"])
+def ping_server():
+    return {"status": "ok"}
+
+
 @app.post("/auth/send-otp")
 def send_otp(req: SendOtpRequest):
     email = _normalize_email(req.email)
@@ -386,7 +391,13 @@ def send_otp(req: SendOtpRequest):
                 (email, otp_hash, expires_at, now_utc),
             )
 
-    _send_otp_email(email, otp)
+    import threading
+    def _bg_mail(to_e, code):
+        try:
+            _send_otp_email(to_e, code)
+        except Exception as exc:
+            print(f"[OTP_BG_ERROR] {exc}", flush=True)
+    threading.Thread(target=_bg_mail, args=(email, otp), daemon=True).start()
     return {"ok": True, "message": "6-digit verification code sent to your email."}
 
 
