@@ -659,9 +659,6 @@ def generate_plan(
         ork = os.environ.get("OPENROUTER_API_KEY", "").strip()
         if ork:
             providers.append(("OpenRouter:openrouter/free", "https://openrouter.ai/api/v1/chat/completions", ork, "openrouter/free", False, None, 20))
-        mk = os.environ.get("MISTRAL_API_KEY", "").strip()
-        if mk:
-            providers.append(("Mistral:mistral-small-latest", "https://api.mistral.ai/v1/chat/completions", mk, "mistral-small-latest", True, None, 15))
         for pname, purl, pkey, pmodel, use_rf, reff, pto in providers:
             if plan_json_str: break
             try:
@@ -686,29 +683,3 @@ def generate_plan(
             cur.execute("UPDATE users SET daily_credits = %s, restored_bonus_credits = %s WHERE email = %s", (daily, bonus, email))
         updated_wallet = get_and_sync_wallet(conn, email)
         return {"wallet": updated_wallet, "plan_json": plan_json_str}
-
-
-
-@app.get("/ai-check")
-def ai_check():
-    res = {}
-    gk = os.environ.get("GEMINI_API_KEY", "").strip()
-    if not gk: res["gemini"] = "NO_KEY"
-    else:
-        gc = genai.Client(api_key=gk)
-        for m in ("gemini-2.5-flash", "gemini-2.5-flash-lite"):
-            try:
-                r = gc.models.generate_content(model=m, contents="Reply OK")
-                res["gemini:"+m] = "OK: " + (r.text or "").strip()[:30]
-            except Exception as e:
-                res["gemini:"+m] = "FAIL: " + str(e)[:160]
-    checks = [("groq", "GROQ_API_KEY", "https://api.groq.com/openai/v1/chat/completions", "llama-3.3-70b-versatile"), ("openrouter", "OPENROUTER_API_KEY", "https://openrouter.ai/api/v1/chat/completions", "openrouter/free"), ("mistral", "MISTRAL_API_KEY", "https://api.mistral.ai/v1/chat/completions", "mistral-small-latest")]
-    for name, envk, url, mdl in checks:
-        k = os.environ.get(envk, "").strip()
-        if not k: res[name] = "NO_KEY"; continue
-        try:
-            r = requests.post(url, headers={"Authorization": "Bearer "+k, "Content-Type": "application/json"}, json={"model": mdl, "messages": [{"role": "user", "content": "Reply OK"}], "max_tokens": 10}, timeout=15)
-            res[name+":"+mdl] = "OK" if r.status_code < 400 else f"HTTP {r.status_code}: {r.text[:160]}"
-        except Exception as e:
-            res[name+":"+mdl] = "FAIL: " + str(e)[:160]
-    return res
