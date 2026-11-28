@@ -535,15 +535,15 @@ def generate_plan(
         import json, re
         system_instruction = (
             "You are an expert Principal Architect and CAD Spatial Planner. Design a complete, intelligent, custom 2D floor plan "
-            "tailored specifically to the user's exact prompt - residential (1BHK, 2BHK, 3BHK, 4BHK, villa, duplex, studio), Vastu home, "
-            "commercial office, clinic, cafe, restaurant, retail shop, or custom plot dimensions (1m=100cm, 1ft=30.48cm).\n"
+            "strictly fulfilling the user's exact request (any number of bedrooms like 1BHK-6BHK, villa, duplex, Vastu home, "
+            "office, clinic, cafe, restaurant, shop, gym, or custom plot dimensions; 1m=100cm, 1ft=30.48cm).\n"
             "RULES: 1) +X is East (Right), +Y is South (Down), (0,0) is North-West (Top-Left). "
-            "2) ZERO OVERLAPS: Stack rooms flush edge-to-edge sharing exact wall coordinates so no two rooms overlap. "
-            "3) VASTU (when requested): North-East = high X, low Y (Living/Pooja); South-East = high X, high Y (Kitchen); "
-            "South-West = low X, high Y (Master Bedroom); North-West = low X, low Y (Guest/Bath). "
-            "4) Add connecting doors (doorLeft/doorRight, 90cm) on shared walls and windows (window, 120-180cm) on outer walls. "
-            "5) Place 2-4 realistic fixtures per room using symbolType in {'bed','sofa','kitchen','bath','wardrobe','desk'} with clear labels "
-            "strictly inside [25, widthCm-fw-25] x [25, lengthCm-fl-25]. Output ONLY valid JSON matching HousePlanSchema."
+            "2) ZERO OVERLAPS: Stack every room flush edge-to-edge sharing exact wall coordinates. "
+            "3) Include EVERY space requested by the user (e.g. 5BHK = 5 distinct bedrooms + hall + dining + kitchen + baths). "
+            "4) VASTU (when requested): NE = high X, low Y (Living/Pooja); SE = high X, high Y (Kitchen); SW = low X, high Y (Master Bed); NW = low X, low Y (Guest/Bath). "
+            "5) Add connecting doors (doorLeft/doorRight, 90cm) on shared walls and windows (window, 120-180cm) on outer walls. "
+            "6) Place 1-3 realistic fixtures per room using symbolType in {'bed','sofa','kitchen','bath','wardrobe','desk'} inside room bounds. "
+            "Output ONLY valid JSON matching HousePlanSchema."
         )
         def _ov(a, b, tol=1.0):
             return a["offsetXCm"] < b["offsetXCm"] + b["widthCm"] - tol and a["offsetXCm"] + a["widthCm"] > b["offsetXCm"] + tol and a["offsetYCm"] < b["offsetYCm"] + b["lengthCm"] - tol and a["offsetYCm"] + a["lengthCm"] > b["offsetYCm"] + tol
@@ -553,10 +553,12 @@ def generate_plan(
             if abs((a["offsetYCm"] + a["lengthCm"]) - b["offsetYCm"]) <= tol and min(a["offsetXCm"] + a["widthCm"], b["offsetXCm"] + b["widthCm"]) - max(a["offsetXCm"], b["offsetXCm"]) >= 80: return "south"
             if abs(a["offsetYCm"] - (b["offsetYCm"] + b["lengthCm"])) <= tol and min(a["offsetXCm"] + a["widthCm"], b["offsetXCm"] + b["widthCm"]) - max(a["offsetXCm"], b["offsetXCm"]) >= 80: return "north"
             return None
-        def clean_plan(raw_text: str) -> str:
-            txt = raw_text.strip()
-            if txt.startswith("```"): txt = re.sub(r"```(?:json)?\s*", "", txt); txt = re.sub(r"\s*```$", "", txt)
-            o = json.loads(txt)
+        def clean_plan(raw_text) -> str:
+            if not raw_text or not isinstance(raw_text, str): raise ValueError("Empty AI output")
+            txt = re.sub(r"\x3cthink\x3e.*?\x3c/think\x3e", "", raw_text, flags=re.S).strip()
+            st_i, en_i = txt.find("{"), txt.rfind("}")
+            if st_i == -1 or en_i <= st_i: raise ValueError("No JSON object found")
+            o = json.loads(txt[st_i:en_i+1])
             if isinstance(o, dict) and "rooms" not in o:
                 for v in o.values():
                     if isinstance(v, dict) and "rooms" in v: o = v; break
@@ -631,42 +633,49 @@ def generate_plan(
             o["rooms"] = placed
             return HousePlanSchema.model_validate(o).model_dump_json()
         plan_json_str = None
-        user_prompt = f"Target Floor Level: {req.floor_level}.\nUser Request: {req.prompt}\nDesign all requested rooms with accurate dimensions, shared flush walls, doors, windows, and rich furniture."
+        hint = " JSON schema: {id,projectName,architectName,rooms:[{id,name,offsetXCm,offsetYCm,widthCm,lengthCm,wallThicknessCm,floorLevel,openings:[{id,type(doorLeft/doorRight/window),wall(north/south/east/west),offsetCm,widthCm}],fixtures:[{id,label,symbolType(bed/sofa/kitchen/bath/desk/wardrobe),xCm,yCm,widthCm,lengthCm,rotationDeg}]}]}"
+        user_prompt = f"Target Floor Level: {req.floor_level}.\nUser Request: {req.prompt}\nDesign EVERY requested room with accurate dimensions, flush shared walls, doors, windows, and furniture."
         g_key = os.environ.get("GEMINI_API_KEY", "").strip()
         if g_key:
             gc = genai.Client(api_key=g_key)
-            for gm in ("gemini-2.5-flash", "gemini-2.5-flash-lite"):
+            for gm in ("gemini-3.8-flash", "gemini-3.5-flash-lite"):
                 if plan_json_str: break
                 try:
-                    try:
-                        cfg = types.GenerateContentConfig(system_instruction=system_instruction, response_mime_type="application/json", response_schema=HousePlanSchema, temperature=0.35, thinking_config=types.ThinkingConfig(thinking_budget=0))
-                    except TypeError:
-                        cfg = types.GenerateContentConfig(system_instruction=system_instruction, response_mime_type="application/json", response_schema=HousePlanSchema, temperature=0.35)
+                    cfg = types.GenerateContentConfig(system_instruction=system_instruction, response_mime_type="application/json", response_schema=HousePlanSchema, temperature=0.35, max_output_tokens=8192)
                     resp = gc.models.generate_content(model=gm, contents=user_prompt, config=cfg)
                     if resp and resp.text:
                         plan_json_str = clean_plan(resp.text); print(f"[AI_SUCCESS] Gemini:{gm}", flush=True); break
                 except Exception as e:
-                    print(f"[AI_FALLBACK] Gemini:{gm} failed: {e}", flush=True)
-        hint = " JSON keys: {id,projectName,architectName,rooms:[{id,name,offsetXCm,offsetYCm,widthCm,lengthCm,wallThicknessCm,floorLevel,openings:[{id,type(doorLeft/doorRight/window),wall(north/south/east/west),offsetCm,widthCm}],fixtures:[{id,label,symbolType(bed/sofa/kitchen/bath/desk/wardrobe),xCm,yCm,widthCm,lengthCm,rotationDeg}]}]}"
+                    print(f"[AI_FALLBACK] Gemini:{gm} schema err: {e}", flush=True)
+                    try:
+                        cfg2 = types.GenerateContentConfig(system_instruction=system_instruction + hint, response_mime_type="application/json", temperature=0.35, max_output_tokens=8192)
+                        resp2 = gc.models.generate_content(model=gm, contents=user_prompt, config=cfg2)
+                        if resp2 and resp2.text:
+                            plan_json_str = clean_plan(resp2.text); print(f"[AI_SUCCESS] Gemini:{gm}:json", flush=True); break
+                    except Exception as e2:
+                        print(f"[AI_FALLBACK] Gemini:{gm} failed: {e2}", flush=True)
         providers = []
         gk = os.environ.get("GROQ_API_KEY", "").strip()
         if gk:
-            for gm in ("llama-3.3-70b-versatile", "meta-llama/llama-4-scout-17b-16e-instruct", "llama-3.1-8b-instant"):
-                providers.append(("Groq:" + gm, "https://" + "api." + "groq.com/openai/v1/chat/completions", gk, gm))
+            for gm in ("openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"):
+                providers.append(("Groq:" + gm, "https" + "://" + "api." + "groq." + "com/openai/v1/chat/completions", gk, gm, False))
         ork = os.environ.get("OPENROUTER_API_KEY", "").strip()
         if ork:
-            for om in ("meta-llama/llama-3.3-70b-instruct:free", "google/gemini-2.0-flash-exp:free", "openrouter/free"):
-                providers.append(("OpenRouter:" + om, "https://" + "openrouter." + "ai/api/v1/chat/completions", ork, om))
+            providers.append(("OpenRouter:openrouter/free", "https" + "://" + "openrouter." + "ai/api/v1/chat/completions", ork, "openrouter/free", False))
         mk = os.environ.get("MISTRAL_API_KEY", "").strip()
         if mk:
-            providers.append(("Mistral:mistral-small-latest", "https://" + "api." + "mistral.ai/v1/chat/completions", mk, "mistral-small-latest"))
-        for pname, purl, pkey, pmodel in providers:
+            providers.append(("Mistral:mistral-small-latest", "https" + "://" + "api." + "mistral." + "ai/api/v1/chat/completions", mk, "mistral-small-latest", True))
+        for pname, purl, pkey, pmodel, use_rf in providers:
             if plan_json_str: break
             try:
-                pr_resp = requests.post(purl, headers={"Authorization": f"Bearer {pkey}", "Content-Type": "application/json"}, json={"model": pmodel, "messages": [{"role": "system", "content": system_instruction + hint}, {"role": "user", "content": user_prompt}], "response_format": {"type": "json_object"}, "temperature": 0.35, "max_tokens": 4096}, timeout=25)
+                payload = {"model": pmodel, "messages": [{"role": "system", "content": system_instruction + hint}, {"role": "user", "content": user_prompt}], "temperature": 0.35, "max_tokens": 8192}
+                if use_rf: payload["response_format"] = {"type": "json_object"}
+                pr_resp = requests.post(purl, headers={"Authorization": f"Bearer {pkey}", "Content-Type": "application/json"}, json=payload, timeout=35)
                 if pr_resp.status_code >= 400:
                     print(f"[AI_FALLBACK] {pname} HTTP {pr_resp.status_code}: {pr_resp.text[:160]}", flush=True); continue
-                plan_json_str = clean_plan(pr_resp.json()["choices"][0]["message"]["content"])
+                msg = pr_resp.json()["choices"][0]["message"]
+                raw_out = msg.get("content") or msg.get("reasoning") or ""
+                plan_json_str = clean_plan(raw_out)
                 print(f"[AI_SUCCESS] {pname}", flush=True); break
             except Exception as ex:
                 print(f"[AI_FALLBACK] {pname} error: {ex}", flush=True); continue
@@ -679,6 +688,7 @@ def generate_plan(
             cur.execute("UPDATE users SET daily_credits = %s, restored_bonus_credits = %s WHERE email = %s", (daily, bonus, email))
         updated_wallet = get_and_sync_wallet(conn, email)
         return {"wallet": updated_wallet, "plan_json": plan_json_str}
+
 
 
 @app.get("/ai-check")
