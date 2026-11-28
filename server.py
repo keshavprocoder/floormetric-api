@@ -641,7 +641,7 @@ def generate_plan(
         gk = os.environ.get("GROQ_API_KEY", "").strip()
         if gk:
             for gm in ("llama-3.3-70b-versatile", "meta-llama/llama-4-scout-17b-16e-instruct", "llama-3.1-8b-instant"):
-                providers.append(("Groq:" + gm, "https://" + "api." + "[groq.com/openai/v1/chat/completions](https://groq.com/openai/v1/chat/completions)", gk, gm))
+                providers.append(("Groq:" + gm, "https://" + "api." + "groq.com/openai/v1/chat/completions", gk, gm))
         ork = os.environ.get("OPENROUTER_API_KEY", "").strip()
         if ork:
             for om in ("meta-llama/llama-3.3-70b-instruct:free", "google/gemini-2.0-flash-exp:free", "openrouter/free"):
