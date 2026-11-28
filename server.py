@@ -518,139 +518,154 @@ def generate_plan(
         wallet = get_and_sync_wallet(conn, email)
         if not wallet["hasLifetimePass"]:
             raise HTTPException(status_code=403, detail="Lifetime Pro Pass required.")
-
         total_credits = wallet["dailyCredits"] + wallet["restoredBonusCredits"]
         if total_credits < 10:
-            raise HTTPException(
-                status_code=402,
-                detail="Insufficient credits. Restore credits (₹499).",
-            )
-
+            raise HTTPException(status_code=402, detail="Insufficient credits. Restore credits (₹499).")
+        import json, re
         system_instruction = (
-            "You are a senior residential architect. Output ONLY valid JSON for a non-overlapping 2D floor plan in cm. "
-            "Stack rooms flush edge-to-edge sharing walls. Doors on connecting walls, windows on exterior walls. "
-            "Keep all fixtures strictly inside room widthCm and lengthCm."
+            "You are an expert Principal Architect and CAD Spatial Planner. Design a complete, intelligent, custom 2D floor plan "
+            "tailored specifically to the user's exact prompt - residential (1BHK, 2BHK, 3BHK, 4BHK, villa, duplex, studio), Vastu home, "
+            "commercial office, clinic, cafe, restaurant, retail shop, or custom plot dimensions (1m=100cm, 1ft=30.48cm).\n"
+            "RULES: 1) +X is East (Right), +Y is South (Down), (0,0) is North-West (Top-Left). "
+            "2) ZERO OVERLAPS: Stack rooms flush edge-to-edge sharing exact wall coordinates so no two rooms overlap. "
+            "3) VASTU (when requested): North-East = high X, low Y (Living/Pooja); South-East = high X, high Y (Kitchen); "
+            "South-West = low X, high Y (Master Bedroom); North-West = low X, low Y (Guest/Bath). "
+            "4) Add connecting doors (doorLeft/doorRight, 90cm) on shared walls and windows (window, 120-180cm) on outer walls. "
+            "5) Place 2-4 realistic fixtures per room using symbolType in {'bed','sofa','kitchen','bath','wardrobe','desk'} with clear labels "
+            "strictly inside [25, widthCm-fw-25] x [25, lengthCm-fl-25]. Output ONLY valid JSON matching HousePlanSchema."
         )
-        import json
-        plan_json_str = None
-        g_key = os.environ.get("GEMINI_API_KEY", "").strip()
-        if g_key:
-            try:
-                gc = genai.Client(api_key=g_key)
-                resp = gc.models.generate_content(model="gemini-3.8-flash", contents=f"Floor Level: {req.floor_level}. Design request: {req.prompt}", config=types.GenerateContentConfig(system_instruction=system_instruction, response_mime_type="application/json", response_schema=HousePlanSchema, temperature=0.3))
-                if resp and resp.text:
-                    plan_json_str = HousePlanSchema.model_validate_json(resp.text).model_dump_json()
-            except Exception as e:
-                print(f"[AI_FALLBACK] Gemini failed: {e}", flush=True)
-        def clean_plan(raw):
-            o = json.loads(raw)
+        def _ov(a, b, tol=1.0):
+            return a["offsetXCm"] < b["offsetXCm"] + b["widthCm"] - tol and a["offsetXCm"] + a["widthCm"] > b["offsetXCm"] + tol and a["offsetYCm"] < b["offsetYCm"] + b["lengthCm"] - tol and a["offsetYCm"] + a["lengthCm"] > b["offsetYCm"] + tol
+        def _sw(a, b, tol=5.0):
+            if abs((a["offsetXCm"] + a["widthCm"]) - b["offsetXCm"]) <= tol and min(a["offsetYCm"] + a["lengthCm"], b["offsetYCm"] + b["lengthCm"]) - max(a["offsetYCm"], b["offsetYCm"]) >= 80: return "east"
+            if abs(a["offsetXCm"] - (b["offsetXCm"] + b["widthCm"])) <= tol and min(a["offsetYCm"] + a["lengthCm"], b["offsetYCm"] + b["lengthCm"]) - max(a["offsetYCm"], b["offsetYCm"]) >= 80: return "west"
+            if abs((a["offsetYCm"] + a["lengthCm"]) - b["offsetYCm"]) <= tol and min(a["offsetXCm"] + a["widthCm"], b["offsetXCm"] + b["widthCm"]) - max(a["offsetXCm"], b["offsetXCm"]) >= 80: return "south"
+            if abs(a["offsetYCm"] - (b["offsetYCm"] + b["lengthCm"])) <= tol and min(a["offsetXCm"] + a["widthCm"], b["offsetXCm"] + b["widthCm"]) - max(a["offsetXCm"], b["offsetXCm"]) >= 80: return "north"
+            return None
+        def clean_plan(raw_text: str) -> str:
+            txt = raw_text.strip()
+            if txt.startswith("```"): txt = re.sub(r"```(?:json)?\s*", "", txt); txt = re.sub(r"\s*```$", "", txt)
+            o = json.loads(txt)
             if isinstance(o, dict) and "rooms" not in o:
                 for v in o.values():
-                    if isinstance(v, dict) and "rooms" in v:
-                        o = v; break
-            o.setdefault("id", "p1")
-            o.setdefault("projectName", "AI Floor Plan")
-            o.setdefault("architectName", "FLOOR METRIC AI STUDIO")
-            rms = o.get("rooms") or []
-            if not isinstance(rms, list) or not rms:
-                raise ValueError("No rooms generated")
-            for ri, r in enumerate(rms):
+                    if isinstance(v, dict) and "rooms" in v: o = v; break
+            o["id"] = str(o.get("id") or f"plan_{int(datetime.now(timezone.utc).timestamp())}")
+            o["projectName"] = str(o.get("projectName") or req.prompt[:42].upper())
+            o["architectName"] = "FLOOR METRIC AI STUDIO"
+            raw_rooms = o.get("rooms") or []
+            if not isinstance(raw_rooms, list) or not raw_rooms: raise ValueError("No rooms")
+            cleaned = []
+            for ri, r in enumerate(raw_rooms):
                 if not isinstance(r, dict): continue
-                r.setdefault("id", f"room_{ri+1}")
-                r.setdefault("name", f"Room {ri+1}")
-                r.setdefault("offsetXCm", 0.0)
-                r.setdefault("offsetYCm", 0.0)
-                rw = max(120.0, float(r.get("widthCm", 360.0)))
-                rl = max(120.0, float(r.get("lengthCm", 360.0)))
-                r["widthCm"] = rw
-                r["lengthCm"] = rl
-                r.setdefault("wallThicknessCm", 23.0)
-                r["floorLevel"] = int(r.get("floorLevel", req.floor_level))
+                rn = str(r.get("name") or f"Room {ri+1}").strip()
+                rw = round(max(140.0, min(1800.0, float(r.get("widthCm", 360.0)))) / 10.0) * 10.0
+                rl = round(max(140.0, min(1800.0, float(r.get("lengthCm", 330.0)))) / 10.0) * 10.0
+                ox = round(float(r.get("offsetXCm", 0.0)) / 10.0) * 10.0
+                oy = round(float(r.get("offsetYCm", 0.0)) / 10.0) * 10.0
+                wt = float(r.get("wallThicknessCm", 23.0))
+                if wt not in (11.5, 23.0): wt = 23.0 if rw >= 330.0 or rl >= 330.0 else 11.5
                 ops = []
                 for oi, op in enumerate(r.get("openings") or []):
                     if not isinstance(op, dict): continue
-                    op.setdefault("id", f"op_{ri+1}_{oi+1}")
                     ot = str(op.get("type", "doorLeft")).lower()
-                    op["type"] = "window" if "win" in ot else ("doorRight" if "right" in ot else "doorLeft")
+                    opt = "window" if "win" in ot else ("doorRight" if "right" in ot else "doorLeft")
                     wl = str(op.get("wall", "south")).lower()
-                    op["wall"] = "north" if wl.startswith(("n", "top", "up")) else ("east" if wl.startswith(("e", "right")) else ("west" if wl.startswith(("w", "left")) else "south"))
-                    op.setdefault("offsetCm", 60.0)
-                    op.setdefault("widthCm", 90.0)
-                    ops.append(op)
-                r["openings"] = ops
+                    wall = "north" if wl.startswith(("n","top","up")) else ("east" if wl.startswith(("e","right")) else ("west" if wl.startswith(("w","left")) else "south"))
+                    wlen = rw if wall in ("north","south") else rl
+                    ow = min(float(op.get("widthCm", 120.0 if opt=="window" else 90.0)), max(60.0, wlen - 40.0))
+                    ops.append({"id": str(op.get("id") or f"op_{ri+1}_{oi+1}"), "type": opt, "wall": wall, "offsetCm": max(20.0, min(float(op.get("offsetCm", 45.0)), max(20.0, wlen - ow - 20.0))), "widthCm": ow})
                 fxs = []
                 for fi, fx in enumerate(r.get("fixtures") or []):
                     if not isinstance(fx, dict): continue
-                    fx.setdefault("id", f"fix_{ri+1}_{fi+1}")
-                    lb = str(fx.get("label", "Fixture"))
-                    fx["label"] = lb
+                    lb = str(fx.get("label") or "Fixture").strip()
                     st = (str(fx.get("symbolType", "")) + " " + lb).lower()
-                    if any(k in st for k in ("bed", "cot", "mattress")): fx["symbolType"] = "bed"
-                    elif any(k in st for k in ("sofa", "couch", "tv", "lounge", "chair")): fx["symbolType"] = "sofa"
-                    elif any(k in st for k in ("kitchen", "stove", "fridge", "cook", "pantry")): fx["symbolType"] = "kitchen"
-                    elif any(k in st for k in ("bath", "toilet", "wc", "shower", "sink", "basin", "wash")): fx["symbolType"] = "bath"
-                    elif any(k in st for k in ("wardrobe", "closet", "cupboard", "almirah", "cabinet")): fx["symbolType"] = "wardrobe"
-                    else: fx["symbolType"] = "desk"
-                    fw = min(float(fx.get("widthCm", 100.0)), max(50.0, rw - 40.0))
-                    fl = min(float(fx.get("lengthCm", 80.0)), max(50.0, rl - 40.0))
-                    fx["widthCm"] = fw
-                    fx["lengthCm"] = fl
-                    fx["xCm"] = max(20.0, min(float(fx.get("xCm", 30.0)), rw - fw - 20.0))
-                    fx["yCm"] = max(20.0, min(float(fx.get("yCm", 30.0)), rl - fl - 20.0))
-                    fx.setdefault("rotationDeg", 0.0)
-                    fxs.append(fx)
-                r["fixtures"] = fxs
+                    sym = "bed" if any(k in st for k in ("bed","cot","mattress")) else ("sofa" if any(k in st for k in ("sofa","couch","lounge","reception","waiting")) else ("kitchen" if any(k in st for k in ("kitchen","stove","cook","pantry","counter","island")) else ("bath" if any(k in st for k in ("bath","toilet","wc","shower","sink","basin","wash")) else ("wardrobe" if any(k in st for k in ("wardrobe","closet","cupboard","almirah","cabinet")) else "desk"))))
+                    fw = min(max(45.0, float(fx.get("widthCm", 110.0))), max(45.0, rw - 40.0))
+                    fl = min(max(45.0, float(fx.get("lengthCm", 75.0))), max(45.0, rl - 40.0))
+                    fxs.append({"id": str(fx.get("id") or f"fix_{ri+1}_{fi+1}"), "label": lb, "symbolType": sym, "xCm": max(20.0, min(float(fx.get("xCm", (rw-fw)/2)), rw-fw-20.0)), "yCm": max(20.0, min(float(fx.get("yCm", (rl-fl)/2)), rl-fl-20.0)), "widthCm": fw, "lengthCm": fl, "rotationDeg": float(fx.get("rotationDeg", 0.0)) % 360.0})
+                if not fxs:
+                    nl = rn.lower()
+                    if any(k in nl for k in ("bed","master","suite","guest")): fxs.append({"id": f"fix_{ri+1}_1", "label": "Queen Bed", "symbolType": "bed", "xCm": 25.0, "yCm": 25.0, "widthCm": min(160.0, rw-45.0), "lengthCm": min(190.0, rl-45.0), "rotationDeg": 0.0})
+                    elif any(k in nl for k in ("living","hall","lounge","foyer")): fxs.append({"id": f"fix_{ri+1}_1", "label": "3-Seat Sofa", "symbolType": "sofa", "xCm": 30.0, "yCm": 30.0, "widthCm": min(200.0, rw-50.0), "lengthCm": min(85.0, rl-50.0), "rotationDeg": 0.0})
+                    elif any(k in nl for k in ("kitchen","pantry","cafe")): fxs.append({"id": f"fix_{ri+1}_1", "label": "Kitchen Counter", "symbolType": "kitchen", "xCm": 25.0, "yCm": 25.0, "widthCm": min(210.0, rw-45.0), "lengthCm": min(65.0, rl-45.0), "rotationDeg": 0.0})
+                    elif any(k in nl for k in ("bath","wc","toilet","wash","restroom")): fxs.append({"id": f"fix_{ri+1}_1", "label": "Bath Suite", "symbolType": "bath", "xCm": 20.0, "yCm": 20.0, "widthCm": min(150.0, rw-35.0), "lengthCm": min(75.0, rl-35.0), "rotationDeg": 0.0})
+                    elif any(k in nl for k in ("office","study","cabin","work","clinic","desk")): fxs.append({"id": f"fix_{ri+1}_1", "label": "Work Desk", "symbolType": "desk", "xCm": 30.0, "yCm": 30.0, "widthCm": min(140.0, rw-50.0), "lengthCm": min(70.0, rl-50.0), "rotationDeg": 0.0})
+                cleaned.append({"id": str(r.get("id") or f"room_{ri+1}"), "name": rn, "offsetXCm": ox, "offsetYCm": oy, "widthCm": rw, "lengthCm": rl, "wallThicknessCm": wt, "floorLevel": int(req.floor_level), "openings": ops, "fixtures": fxs})
+            placed = []
+            for rm in cleaned:
+                if not placed:
+                    rm["offsetXCm"], rm["offsetYCm"] = 0.0, 0.0; placed.append(rm); continue
+                if any(_ov(rm, p) for p in placed):
+                    cands = []
+                    for p in placed:
+                        cands.extend([(p["offsetXCm"]+p["widthCm"], p["offsetYCm"]), (p["offsetXCm"], p["offsetYCm"]+p["lengthCm"]), (p["offsetXCm"]-rm["widthCm"], p["offsetYCm"]), (p["offsetXCm"], p["offsetYCm"]-rm["lengthCm"])])
+                    valid = [(abs(cx-rm["offsetXCm"])+abs(cy-rm["offsetYCm"]), cx, cy) for cx, cy in cands if not any(_ov(dict(rm, offsetXCm=cx, offsetYCm=cy), p) for p in placed)]
+                    if valid:
+                        valid.sort(key=lambda t: t[0]); rm["offsetXCm"], rm["offsetYCm"] = valid[0][1], valid[0][2]
+                placed.append(rm)
+            mx, my = min(r["offsetXCm"] for r in placed), min(r["offsetYCm"] for r in placed)
+            for r in placed: r["offsetXCm"] -= mx; r["offsetYCm"] -= my
+            for idx, r in enumerate(placed):
+                if not any(op["type"] in ("doorLeft","doorRight") for op in r["openings"]):
+                    dw = next((_sw(r, o) for k, o in enumerate(placed) if k != idx and _sw(r, o)), "south")
+                    wl = r["widthCm"] if dw in ("north","south") else r["lengthCm"]
+                    r["openings"].append({"id": f"ad_{idx+1}", "type": "doorLeft", "wall": dw, "offsetCm": max(20.0, min(40.0, wl-110.0)), "widthCm": min(90.0, max(65.0, wl-40.0))})
+                if not any(op["type"] == "window" for op in r["openings"]):
+                    occ = {_sw(r, o) for k, o in enumerate(placed) if k != idx}
+                    for cw in ("north","east","west","south"):
+                        if cw not in occ:
+                            wl = r["widthCm"] if cw in ("north","south") else r["lengthCm"]
+                            if wl >= 120.0:
+                                r["openings"].append({"id": f"aw_{idx+1}", "type": "window", "wall": cw, "offsetCm": max(25.0, (wl-min(140.0, wl-50.0))/2), "widthCm": min(140.0, wl-50.0)}); break
+            o["rooms"] = placed
             return HousePlanSchema.model_validate(o).model_dump_json()
+        plan_json_str = None
+        user_prompt = f"Target Floor Level: {req.floor_level}.\nUser Request: {req.prompt}\nDesign all requested rooms with accurate dimensions, shared flush walls, doors, windows, and rich furniture."
+        g_key = os.environ.get("GEMINI_API_KEY", "").strip()
+        if g_key:
+            gc = genai.Client(api_key=g_key)
+            for gm in ("gemini-2.5-flash", "gemini-2.5-flash-lite"):
+                if plan_json_str: break
+                try:
+                    try:
+                        cfg = types.GenerateContentConfig(system_instruction=system_instruction, response_mime_type="application/json", response_schema=HousePlanSchema, temperature=0.35, thinking_config=types.ThinkingConfig(thinking_budget=0))
+                    except TypeError:
+                        cfg = types.GenerateContentConfig(system_instruction=system_instruction, response_mime_type="application/json", response_schema=HousePlanSchema, temperature=0.35)
+                    resp = gc.models.generate_content(model=gm, contents=user_prompt, config=cfg)
+                    if resp and resp.text:
+                        plan_json_str = clean_plan(resp.text); print(f"[AI_SUCCESS] Gemini:{gm}", flush=True); break
+                except Exception as e:
+                    print(f"[AI_FALLBACK] Gemini:{gm} failed: {e}", flush=True)
         hint = " JSON keys: {id,projectName,architectName,rooms:[{id,name,offsetXCm,offsetYCm,widthCm,lengthCm,wallThicknessCm,floorLevel,openings:[{id,type(doorLeft/doorRight/window),wall(north/south/east/west),offsetCm,widthCm}],fixtures:[{id,label,symbolType(bed/sofa/kitchen/bath/desk/wardrobe),xCm,yCm,widthCm,lengthCm,rotationDeg}]}]}"
         providers = []
         gk = os.environ.get("GROQ_API_KEY", "").strip()
         if gk:
-            for gm in ("llama-3.1-8b-instant", "meta-llama/llama-4-scout-17b-16e-instruct", "openai/gpt-oss-20b"):
-                providers.append(("Groq:" + gm, "https://api.groq.com/openai/v1/chat/completions", gk, gm))
+            for gm in ("llama-3.3-70b-versatile", "meta-llama/llama-4-scout-17b-16e-instruct", "llama-3.1-8b-instant"):
+                providers.append(("Groq:" + gm, "https://" + "api." + "[groq.com/openai/v1/chat/completions](https://groq.com/openai/v1/chat/completions)", gk, gm))
         ork = os.environ.get("OPENROUTER_API_KEY", "").strip()
         if ork:
-            for om in ("openrouter/free", "google/gemini-2.0-flash-exp:free", "meta-llama/llama-3.3-70b-instruct:free"):
-                providers.append(("OpenRouter:" + om, "https://openrouter.ai/api/v1/chat/completions", ork, om))
+            for om in ("meta-llama/llama-3.3-70b-instruct:free", "google/gemini-2.0-flash-exp:free", "openrouter/free"):
+                providers.append(("OpenRouter:" + om, "https://" + "openrouter." + "ai/api/v1/chat/completions", ork, om))
         mk = os.environ.get("MISTRAL_API_KEY", "").strip()
         if mk:
-            providers.append(("Mistral:mistral-small-latest", "https://api.mistral.ai/v1/chat/completions", mk, "mistral-small-latest"))
+            providers.append(("Mistral:mistral-small-latest", "https://" + "api." + "mistral.ai/v1/chat/completions", mk, "mistral-small-latest"))
         for pname, purl, pkey, pmodel in providers:
             if plan_json_str: break
             try:
-                pr_resp = requests.post(purl, headers={"Authorization": f"Bearer {pkey}", "Content-Type": "application/json"}, json={"model": pmodel, "messages": [{"role": "system", "content": system_instruction + hint}, {"role": "user", "content": f"Floor Level: {req.floor_level}. Design request: {req.prompt}"}], "response_format": {"type": "json_object"}, "temperature": 0.3}, timeout=10)
+                pr_resp = requests.post(purl, headers={"Authorization": f"Bearer {pkey}", "Content-Type": "application/json"}, json={"model": pmodel, "messages": [{"role": "system", "content": system_instruction + hint}, {"role": "user", "content": user_prompt}], "response_format": {"type": "json_object"}, "temperature": 0.35, "max_tokens": 4096}, timeout=25)
                 if pr_resp.status_code >= 400:
-                    print(f"[AI_FALLBACK] {pname} HTTP {pr_resp.status_code}: {pr_resp.text[:160]}", flush=True)
-                    continue
+                    print(f"[AI_FALLBACK] {pname} HTTP {pr_resp.status_code}: {pr_resp.text[:160]}", flush=True); continue
                 plan_json_str = clean_plan(pr_resp.json()["choices"][0]["message"]["content"])
-                print(f"[AI_SUCCESS] {pname}", flush=True)
-                break
+                print(f"[AI_SUCCESS] {pname}", flush=True); break
             except Exception as ex:
-                print(f"[AI_FALLBACK] {pname} error: {ex}", flush=True)
-                continue
+                print(f"[AI_FALLBACK] {pname} error: {ex}", flush=True); continue
         if not plan_json_str:
             raise HTTPException(status_code=400, detail="AI generation failed. Please try again.")
-
-        daily = wallet["dailyCredits"]
-        bonus = wallet["restoredBonusCredits"]
-        if daily >= 10:
-            daily -= 10
-        else:
-            rem = 10 - daily
-            daily = 0
-            bonus -= rem
-
+        daily, bonus = wallet["dailyCredits"], wallet["restoredBonusCredits"]
+        if daily >= 10: daily -= 10
+        else: rem = 10 - daily; daily = 0; bonus -= rem
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE users
-                SET daily_credits = %s, restored_bonus_credits = %s
-                WHERE email = %s
-                """,
-                (daily, bonus, email),
-            )
+            cur.execute("UPDATE users SET daily_credits = %s, restored_bonus_credits = %s WHERE email = %s", (daily, bonus, email))
         updated_wallet = get_and_sync_wallet(conn, email)
+        return {"wallet": updated_wallet, "plan_json": plan_json_str}
 
-        return {
-            "wallet": updated_wallet,
-            "plan_json": plan_json_str,
-        }
