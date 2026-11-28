@@ -533,6 +533,9 @@ def generate_plan(
         if total_credits < 10:
             raise HTTPException(status_code=402, detail="Insufficient credits. Restore credits (₹499).")
         import json, re
+        p_txt = (req.prompt or "").strip()
+        if len(p_txt) < 3 or not re.search(r"[A-Za-z]", p_txt):
+            raise HTTPException(status_code=400, detail="Please describe a floor plan or room layout (e.g. 2BHK Vastu home or Dental clinic).")
         system_instruction = (
             "You are an expert Principal Architect and CAD Spatial Planner. Design a complete, intelligent, custom 2D floor plan "
             "strictly fulfilling the user's exact request (any number of bedrooms like 1BHK-6BHK, villa, duplex, Vastu home, "
@@ -543,6 +546,7 @@ def generate_plan(
             "4) VASTU (when requested): NE = high X, low Y (Living/Pooja); SE = high X, high Y (Kitchen); SW = low X, high Y (Master Bed); NW = low X, low Y (Guest/Bath). "
             "5) Add connecting doors (doorLeft/doorRight, 90cm) on shared walls and windows (window, 120-180cm) on outer walls. "
             "6) Place 1-3 realistic fixtures per room using symbolType in {'bed','sofa','kitchen','bath','wardrobe','desk'} inside room bounds. "
+            "7) If the request is NOT for designing a floor plan, building, room, plot, home, office, shop, clinic, or architectural space (e.g. jokes, coding, math, general chat), output ONLY {\"rejected\": true, \"reason\": \"Please enter a floor plan or building layout request.\"}. "
             "Output ONLY valid JSON matching HousePlanSchema."
         )
         def _ov(a, b, tol=1.0):
@@ -559,6 +563,8 @@ def generate_plan(
             st_i, en_i = txt.find("{"), txt.rfind("}")
             if st_i == -1 or en_i <= st_i: raise ValueError("No JSON object found")
             o = json.loads(txt[st_i:en_i+1])
+            if isinstance(o, dict) and o.get("rejected"):
+                raise HTTPException(status_code=400, detail=str(o.get("reason") or "Please enter a valid floor plan or building layout request."))
             if isinstance(o, dict) and "rooms" not in o:
                 for v in o.values():
                     if isinstance(v, dict) and "rooms" in v: o = v; break
@@ -649,6 +655,8 @@ def generate_plan(
                     raw_g = "".join(pt.get("text", "") for pt in parts if not pt.get("thought"))
                     plan_json_str = clean_plan(raw_g)
                     print(f"[AI_SUCCESS] Gemini:{gm} ({tl})", flush=True); break
+                except HTTPException:
+                    raise
                 except Exception as e:
                     print(f"[AI_FALLBACK] Gemini:{gm} failed: {e}", flush=True)
         providers = []
